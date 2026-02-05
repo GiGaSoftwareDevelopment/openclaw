@@ -161,6 +161,8 @@ export function storeRoleRefsForTarget(opts: {
 /**
  * Look up the role+name+nth metadata for a specific ref in the cached roleRefs for a target.
  * Returns undefined if the target or ref is not found.
+ *
+ * Refs are normalized: a bare number like "123" is treated as "e123".
  */
 export function lookupRefInfo(opts: {
   cdpUrl: string;
@@ -192,8 +194,14 @@ export function findRefByRoleInfo(opts: {
   if (!cached?.refs) {
     return undefined;
   }
+  const normalizedOptsNth = opts.nth ?? 0;
   for (const [ref, info] of Object.entries(cached.refs)) {
-    if (info.role === opts.role && info.name === opts.name && info.nth === opts.nth) {
+    const normalizedInfoNth = info.nth ?? 0;
+    if (
+      info.role === opts.role &&
+      info.name === opts.name &&
+      normalizedInfoNth === normalizedOptsNth
+    ) {
       return ref;
     }
   }

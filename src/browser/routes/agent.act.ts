@@ -26,7 +26,6 @@ const STALE_REF_PATTERNS = [
   /Element "e?\d+" not found or not visible/,
   /Selector "e?\d+" matched \d+ elements/,
   /Element "e?\d+" is not interactable/,
-  /not found or not visible/,
   /locator\.ariaSnapshot/,
 ] as const;
 
@@ -78,7 +77,10 @@ export function registerBrowserAgentActRoutes(
       return jsonError(res, 400, SELECTOR_UNSUPPORTED_MESSAGE);
     }
 
-    // CLAW-5: track whether this is a stale-ref retry attempt
+    // CLAW-5: Auto-retry with re-snapshot on stale refs.
+    // Flow: attempt action → on stale-ref error, re-snapshot + remap refs → retry once.
+    // All switch cases return on success. The catch block either continues (retry)
+    // or returns (non-retryable error / already retried). Max 1 retry via isRetry flag.
     let isRetry = false;
 
     // eslint-disable-next-line no-constant-condition
@@ -468,19 +470,15 @@ export function registerBrowserAgentActRoutes(
 
           // Enhance the error message when auto-retry couldn't find a match
           const msg = err instanceof Error ? err.message : String(err);
-          handleRouteError(
-            ctx,
-            res,
-            new Error(
-              `${msg} (auto-retry: re-snapshotted but could not find matching element — the element may have been removed from the page)`,
-            ),
-          );
+          const maxMsgLen = 500;
+          const truncatedMsg = msg.length > maxMsgLen ? `${msg.slice(0, maxMsgLen)}…` : msg;
+          const enhancedMessage = `${truncatedMsg}\n(auto-retry: re-snapshotted but could not find matching element — the element may have been removed from the page)`;
+          handleRouteError(ctx, res, new Error(enhancedMessage));
           return;
         }
         handleRouteError(ctx, res, err);
         return;
       }
-      break; // action succeeded, exit the while loop
     } // end while
   });
 
