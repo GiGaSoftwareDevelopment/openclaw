@@ -2,13 +2,17 @@
 
 Docs: https://docs.openclaw.ai
 
-## 2026.2.3
+## 2026.2.4
 
 ### Changes
 
+- Models: default Anthropic model to `anthropic/claude-opus-4-6`. (#9853) Thanks @TinyTb.
+- Telegram: auto-inject forum topic `threadId` in message tool and subagent announce so media, buttons, and subagent results land in the correct topic instead of General. (#7235) Thanks @Lukavyi.
+- CLI: sort `openclaw --help` commands (and options) alphabetically. (#8068) Thanks @deepsoumya617.
 - Telegram: remove last `@ts-nocheck` from `bot-handlers.ts`, use Grammy types directly, deduplicate `StickerMetadata`. Zero `@ts-nocheck` remaining in `src/telegram/`. (#9206)
 - Telegram: remove `@ts-nocheck` from `bot-message.ts`, type deps via `Omit<BuildTelegramMessageContextParams>`, widen `allMedia` to `TelegramMediaRef[]`. (#9180)
 - Telegram: remove `@ts-nocheck` from `bot.ts`, fix duplicate `bot.catch` error handler (Grammy overrides), remove dead reaction `message_thread_id` routing, harden sticker cache guard. (#9077)
+- Feishu: expand channel handling (posts with images, doc links, routing, reactions/typing, replies, native commands). (#8975) Thanks @jiulingyun.
 - Onboarding: add Cloudflare AI Gateway provider setup and docs. (#7914) Thanks @roerohan.
 - Onboarding: add Moonshot (.cn) auth choice and keep the China base URL when preserving defaults. (#7180) Thanks @waynelwz.
 - Docs: clarify tmux send-keys for TUI by splitting text and Enter. (#7737) Thanks @Wangnov.
@@ -23,6 +27,11 @@ Docs: https://docs.openclaw.ai
 
 ### Fixes
 
+- Compaction: remove orphaned `tool_result` messages during history pruning to prevent session corruption from aborted tool calls. (#9868, fixes #9769, #9724, #9672)
+- Telegram: pass `parentPeer` for forum topic binding inheritance so group-level bindings apply to all topics within the group. (#9789, fixes #9545, #9351)
+- CLI: pass `--disable-warning=ExperimentalWarning` as a Node CLI option when respawning (avoid disallowed `NODE_OPTIONS` usage; fixes npm pack). (#9691) Thanks @18-RAJAT.
+- CLI: resolve bundled Chrome extension assets by walking up to the nearest assets directory; add resolver and clipboard tests. (#8914) Thanks @kelvinCB.
+- Tests: stabilize Windows ACL coverage with deterministic os.userInfo mocking. (#9335) Thanks @M00N7682.
 - Heartbeat: allow explicit accountId routing for multi-account channels. (#8702) Thanks @lsh411.
 - TUI/Gateway: handle non-streaming finals, refresh history for non-local chat runs, and avoid event gap warnings for targeted tool streams. (#8432) Thanks @gumadeiras.
 - Shell completion: auto-detect and migrate slow dynamic patterns to cached files for faster terminal startup; add completion health checks to doctor/update/onboard.
@@ -42,6 +51,7 @@ Docs: https://docs.openclaw.ai
 - Cron: reload store data when the store file is recreated or mtime changes.
 - Cron: deliver announce runs directly, honor delivery mode, and respect wakeMode for summaries. (#8540) Thanks @tyler6204.
 - Telegram: include forward_from_chat metadata in forwarded messages and harden cron delivery target checks. (#8392) Thanks @Glucksberg.
+- Telegram: preserve DM topic threadId in deliveryContext. (#9039) Thanks @lailoo.
 - macOS: fix cron payload summary rendering and ISO 8601 formatter concurrency safety.
 
 ## 2026.2.2-3
