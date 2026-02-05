@@ -24,20 +24,21 @@ function browserRobustFill(el: Element, value: string): void {
   if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) {
     // For contenteditable elements, set textContent and dispatch events
     if (el.isContentEditable) {
-      el.dispatchEvent(new Event("focus", { bubbles: true }));
+      el.dispatchEvent(new Event("focus", { bubbles: false }));
       el.textContent = value;
       el.dispatchEvent(
         new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
       );
       el.dispatchEvent(new Event("change", { bubbles: true }));
-      el.dispatchEvent(new Event("blur", { bubbles: true }));
+      el.dispatchEvent(new Event("blur", { bubbles: false }));
       return;
     }
     throw new Error("Element is not an input, textarea, or contenteditable");
   }
 
   // Focus first, matching natural user interaction flow
-  el.dispatchEvent(new Event("focus", { bubbles: true }));
+  // Per DOM spec: focus does not bubble (use focusin for bubbling variant)
+  el.dispatchEvent(new Event("focus", { bubbles: false }));
 
   // Use the native prototype setter to bypass framework overrides (React, etc.)
   const proto =
@@ -54,7 +55,8 @@ function browserRobustFill(el: Element, value: string): void {
     new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
   );
   el.dispatchEvent(new Event("change", { bubbles: true }));
-  el.dispatchEvent(new Event("blur", { bubbles: true }));
+  // Per DOM spec: blur does not bubble (use focusout for bubbling variant)
+  el.dispatchEvent(new Event("blur", { bubbles: false }));
 }
 
 /**
@@ -88,17 +90,15 @@ async function fillWithVerify(locator: Locator, value: string, timeout: number):
   await locator.evaluate(browserRobustFill, value);
 
   // Final verify — if still wrong, throw so the caller knows
-  const finalValue = await locator
-    .evaluate((el) => {
-      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-        return el.value;
-      }
-      if (el.isContentEditable) {
-        return el.textContent ?? "";
-      }
-      return null;
-    })
-    .catch(() => null);
+  const finalValue = await locator.evaluate((el) => {
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      return el.value;
+    }
+    if (el.isContentEditable) {
+      return el.textContent ?? "";
+    }
+    return null;
+  });
 
   if (finalValue !== null && finalValue !== value) {
     throw new Error(
