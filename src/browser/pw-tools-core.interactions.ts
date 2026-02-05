@@ -264,13 +264,10 @@ export async function selectComboboxOptionViaPlaywright(opts: {
     // Step 1: Click to expand the combobox
     await combobox.click({ timeout });
 
-    // Step 2: Wait for listbox/options to appear
-    // Look for role="listbox" or role="option" elements
-    const listbox = page.getByRole("listbox").first();
-    const hasListbox = await listbox.isVisible().catch(() => false);
+    // Step 2: Wait briefly for dropdown to render
+    await page.waitForTimeout(100);
 
-    // Step 3: Find and click the matching option
-    // Try exact match first, then partial/case-insensitive
+    // Step 3: Find and click the matching option (partial, case-insensitive)
     const optionLocator = page.getByRole("option", { name: value, exact: false });
     const optionCount = await optionLocator.count();
 
