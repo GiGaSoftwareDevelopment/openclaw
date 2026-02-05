@@ -440,9 +440,10 @@ function createProfileContext(
           // Give Playwright time to process the Target.attachedToTarget event
           await new Promise((r) => setTimeout(r, 300));
         }
-      } catch {
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
         throw new Error(
-          `Failed to auto-attach discovered tab ${chosen.targetId} for profile "${profile.name}".`,
+          `Failed to auto-attach discovered tab ${chosen.targetId} for profile "${profile.name}": ${detail}`,
         );
       }
     }
