@@ -506,6 +506,17 @@ export async function getPageForTargetId(opts: {
     if (pages.length === 1) {
       return first;
     }
+    // Retry once after a short delay — auto-attach may have just happened
+    // and Playwright hasn't processed the Target.attachedToTarget event yet
+    await new Promise((r) => setTimeout(r, 400));
+    const retryPages = await getAllPages(browser);
+    const retryFound = await findPageByTargetId(browser, opts.targetId, opts.cdpUrl);
+    if (retryFound) {
+      return retryFound;
+    }
+    if (retryPages.length === 1 && retryPages[0]) {
+      return retryPages[0];
+    }
     throw new Error("tab not found");
   }
   return found;

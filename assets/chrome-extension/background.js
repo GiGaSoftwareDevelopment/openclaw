@@ -93,6 +93,9 @@ async function ensureRelayConnection() {
       chrome.debugger.onEvent.addListener(onDebuggerEvent)
       chrome.debugger.onDetach.addListener(onDebuggerDetach)
     }
+
+    // Send all open tabs to relay for discovery
+    void sendAllTabsToRelay()
   })()
 
   try {
@@ -128,6 +131,37 @@ function sendToRelay(payload) {
     throw new Error('Relay not connected')
   }
   ws.send(JSON.stringify(payload))
+}
+
+function isInternalUrl(url) {
+  if (!url) return true
+  return url.startsWith('chrome://') ||
+    url.startsWith('chrome-extension://') ||
+    url.startsWith('devtools://') ||
+    url.startsWith('about:') ||
+    url.startsWith('edge://') ||
+    url.startsWith('brave://')
+}
+
+async function sendAllTabsToRelay() {
+  try {
+    const allTabs = await chrome.tabs.query({})
+    const filteredTabs = allTabs.filter(t => t.id && t.url && !isInternalUrl(t.url))
+    sendToRelay({
+      method: 'tabsDiscovered',
+      params: {
+        tabs: filteredTabs.map(t => ({
+          tabId: t.id,
+          title: t.title || '',
+          url: t.url || '',
+          active: t.active || false,
+          windowId: t.windowId,
+        }))
+      }
+    })
+  } catch {
+    // Ignore — discovery is best-effort
+  }
 }
 
 async function maybeOpenHelpOnce() {
@@ -178,6 +212,24 @@ async function onRelayMessage(text) {
     pending.delete(msg.id)
     if (msg.error) p.reject(new Error(String(msg.error)))
     else p.resolve(msg.result)
+    return
+  }
+
+  if (msg && typeof msg.id === 'number' && msg.method === 'attachDiscoveredTab') {
+    try {
+      const tabId = msg.params?.tabId
+      if (!tabId) throw new Error('tabId required')
+      // Check if already attached
+      const existing = tabs.get(tabId)
+      if (existing?.state === 'connected') {
+        sendToRelay({ id: msg.id, result: { sessionId: existing.sessionId, targetId: existing.targetId } })
+        return
+      }
+      const result = await attachTab(tabId)
+      sendToRelay({ id: msg.id, result: { sessionId: result.sessionId, targetId: result.targetId } })
+    } catch (err) {
+      sendToRelay({ id: msg.id, error: err instanceof Error ? err.message : String(err) })
+    }
     return
   }
 
@@ -435,4 +487,47 @@ chrome.action.onClicked.addListener(() => void connectOrToggleForActiveTab())
 chrome.runtime.onInstalled.addListener(() => {
   // Useful: first-time instructions.
   void chrome.runtime.openOptionsPage()
+})
+
+chrome.tabs.onCreated.addListener((tab) => {
+  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return
+  if (!tab.id || isInternalUrl(tab.url || tab.pendingUrl || '')) return
+  try {
+    sendToRelay({
+      method: 'tabDiscovered',
+      params: { tabId: tab.id, title: tab.title || '', url: tab.url || tab.pendingUrl || '', active: tab.active || false }
+    })
+  } catch { /* ignore */ }
+})
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return
+  // If this tab was attached, detachTab handles cleanup
+  // For discovery, notify relay
+  try {
+    sendToRelay({ method: 'tabRemoved', params: { tabId } })
+  } catch { /* ignore */ }
+})
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return
+  if (!changeInfo.title && !changeInfo.url && !changeInfo.status) return
+  if (isInternalUrl(tab.url || '')) {
+    // Tab navigated to internal URL — remove from discovery
+    try { sendToRelay({ method: 'tabRemoved', params: { tabId } }) } catch { /* ignore */ }
+    return
+  }
+  try {
+    sendToRelay({
+      method: 'tabUpdated',
+      params: { tabId, title: tab.title || '', url: tab.url || '', active: tab.active || false }
+    })
+  } catch { /* ignore */ }
+})
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  if (!relayWs || relayWs.readyState !== WebSocket.OPEN) return
+  try {
+    sendToRelay({ method: 'tabActivated', params: { tabId: activeInfo.tabId, windowId: activeInfo.windowId } })
+  } catch { /* ignore */ }
 })

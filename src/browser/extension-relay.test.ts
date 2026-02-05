@@ -366,4 +366,258 @@ describe("chrome extension relay server", () => {
     cdp.close();
     ext.close();
   });
+
+  it("includes discovered tabs in /json/list", async () => {
+    const port = await getFreePort();
+    cdpUrl = `http://127.0.0.1:${port}`;
+    await ensureChromeExtensionRelayServer({ cdpUrl });
+
+    const ext = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    await waitForOpen(ext);
+
+    // Send tab discovery
+    ext.send(
+      JSON.stringify({
+        method: "tabsDiscovered",
+        params: {
+          tabs: [
+            { tabId: 100, title: "Google", url: "https://google.com", active: true },
+            { tabId: 101, title: "GitHub", url: "https://github.com", active: false },
+          ],
+        },
+      }),
+    );
+
+    // Give relay time to process
+    await new Promise((r) => setTimeout(r, 100));
+
+    const list = (await fetch(`${cdpUrl}/json/list`, {
+      headers: relayAuthHeaders(cdpUrl),
+    }).then((r) => r.json())) as Array<{ id?: string; title?: string; url?: string }>;
+
+    expect(list.some((t) => t.id === "dtab-100" && t.title === "Google")).toBe(true);
+    expect(list.some((t) => t.id === "dtab-101" && t.title === "GitHub")).toBe(true);
+
+    ext.close();
+  });
+
+  it("updates discovered tabs on lifecycle events", async () => {
+    const port = await getFreePort();
+    cdpUrl = `http://127.0.0.1:${port}`;
+    await ensureChromeExtensionRelayServer({ cdpUrl });
+
+    const ext = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    await waitForOpen(ext);
+
+    // Initial discovery
+    ext.send(
+      JSON.stringify({
+        method: "tabsDiscovered",
+        params: {
+          tabs: [{ tabId: 200, title: "Old Title", url: "https://example.com", active: false }],
+        },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Update title/url
+    ext.send(
+      JSON.stringify({
+        method: "tabUpdated",
+        params: { tabId: 200, title: "New Title", url: "https://example.com/page", active: false },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    let list = (await fetch(`${cdpUrl}/json/list`, {
+      headers: relayAuthHeaders(cdpUrl),
+    }).then((r) => r.json())) as Array<{ id?: string; title?: string; url?: string }>;
+
+    expect(
+      list.some(
+        (t) =>
+          t.id === "dtab-200" && t.title === "New Title" && t.url === "https://example.com/page",
+      ),
+    ).toBe(true);
+
+    // Remove tab
+    ext.send(JSON.stringify({ method: "tabRemoved", params: { tabId: 200 } }));
+    await new Promise((r) => setTimeout(r, 50));
+
+    list = (await fetch(`${cdpUrl}/json/list`, {
+      headers: relayAuthHeaders(cdpUrl),
+    }).then((r) => r.json())) as Array<{ id?: string }>;
+
+    expect(list.some((t) => t.id === "dtab-200")).toBe(false);
+
+    ext.close();
+  });
+
+  it("does not duplicate attached tabs in /json/list", async () => {
+    const port = await getFreePort();
+    cdpUrl = `http://127.0.0.1:${port}`;
+    await ensureChromeExtensionRelayServer({ cdpUrl });
+
+    const ext = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    await waitForOpen(ext);
+
+    // Discover tab
+    ext.send(
+      JSON.stringify({
+        method: "tabsDiscovered",
+        params: {
+          tabs: [{ tabId: 300, title: "Example", url: "https://example.com", active: true }],
+        },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Also attach the same tab (simulates manual click)
+    ext.send(
+      JSON.stringify({
+        method: "forwardCDPEvent",
+        params: {
+          method: "Target.attachedToTarget",
+          params: {
+            sessionId: "cb-tab-1",
+            targetInfo: {
+              targetId: "real-t1",
+              type: "page",
+              title: "Example",
+              url: "https://example.com",
+            },
+            waitingForDebugger: false,
+          },
+        },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    const list = (await fetch(`${cdpUrl}/json/list`, {
+      headers: relayAuthHeaders(cdpUrl),
+    }).then((r) => r.json())) as Array<{ id?: string; title?: string }>;
+
+    // Should have the attached version (real-t1), not the discovered version (dtab-300)
+    const exampleTabs = list.filter((t) => t.title === "Example");
+    expect(exampleTabs.length).toBe(1);
+    expect(exampleTabs[0]?.id).toBe("real-t1");
+
+    ext.close();
+  });
+
+  it("auto-attaches a discovered tab via /json/attach", async () => {
+    const port = await getFreePort();
+    cdpUrl = `http://127.0.0.1:${port}`;
+    await ensureChromeExtensionRelayServer({ cdpUrl });
+
+    const ext = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    await waitForOpen(ext);
+    const q = createMessageQueue(ext);
+
+    // Discover tabs
+    ext.send(
+      JSON.stringify({
+        method: "tabsDiscovered",
+        params: {
+          tabs: [{ tabId: 400, title: "Target Tab", url: "https://target.com", active: false }],
+        },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Request auto-attach — this runs async, so we need to handle the extension's side
+    const attachPromise = fetch(`${cdpUrl}/json/attach/dtab-400`, {
+      method: "POST",
+      headers: relayAuthHeaders(cdpUrl),
+    });
+
+    // Extension receives attachDiscoveredTab command
+    const extMsg = JSON.parse(await q.next()) as {
+      id: number;
+      method: string;
+      params?: { tabId?: number };
+    };
+    // Skip pings
+    let msg = extMsg;
+    while (msg.method === "ping") {
+      ext.send(JSON.stringify({ method: "pong" }));
+      msg = JSON.parse(await q.next()) as typeof extMsg;
+    }
+
+    expect(msg.method).toBe("attachDiscoveredTab");
+    expect(msg.params?.tabId).toBe(400);
+
+    // Simulate successful attach
+    ext.send(
+      JSON.stringify({
+        id: msg.id,
+        result: { sessionId: "cb-tab-10", targetId: "real-target-400" },
+      }),
+    );
+
+    // Also send the Target.attachedToTarget event (as the real extension would)
+    ext.send(
+      JSON.stringify({
+        method: "forwardCDPEvent",
+        params: {
+          method: "Target.attachedToTarget",
+          params: {
+            sessionId: "cb-tab-10",
+            targetInfo: {
+              targetId: "real-target-400",
+              type: "page",
+              title: "Target Tab",
+              url: "https://target.com",
+            },
+            waitingForDebugger: false,
+          },
+        },
+      }),
+    );
+
+    const attachRes = await attachPromise;
+    expect(attachRes.status).toBe(200);
+    const body = (await attachRes.json()) as { targetId?: string; sessionId?: string };
+    expect(body.targetId).toBe("real-target-400");
+    expect(body.sessionId).toBe("cb-tab-10");
+
+    ext.close();
+  });
+
+  it("clears discovered tabs when extension disconnects", async () => {
+    const port = await getFreePort();
+    cdpUrl = `http://127.0.0.1:${port}`;
+    await ensureChromeExtensionRelayServer({ cdpUrl });
+
+    const ext = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    await waitForOpen(ext);
+
+    ext.send(
+      JSON.stringify({
+        method: "tabsDiscovered",
+        params: { tabs: [{ tabId: 500, title: "Tab", url: "https://example.com", active: false }] },
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    let list = (await fetch(`${cdpUrl}/json/list`, {
+      headers: relayAuthHeaders(cdpUrl),
+    }).then((r) => r.json())) as Array<{ id?: string }>;
+    expect(list.some((t) => t.id === "dtab-500")).toBe(true);
+
+    // Disconnect extension
+    ext.close();
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Reconnect new extension (no tabs yet)
+    const ext2 = new WebSocket(`ws://127.0.0.1:${port}/extension`);
+    await waitForOpen(ext2);
+
+    list = (await fetch(`${cdpUrl}/json/list`, {
+      headers: relayAuthHeaders(cdpUrl),
+    }).then((r) => r.json())) as Array<{ id?: string }>;
+    expect(list.some((t) => t.id === "dtab-500")).toBe(false);
+
+    ext2.close();
+  });
 });
