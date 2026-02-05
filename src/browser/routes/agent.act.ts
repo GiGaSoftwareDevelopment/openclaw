@@ -226,13 +226,30 @@ export function registerBrowserAgentActRoutes(
               return jsonError(res, 400, "ref and values are required");
             }
             const timeoutMs = toNumber(body.timeoutMs);
-            await pw.selectOptionViaPlaywright({
-              cdpUrl,
-              targetId: tab.targetId,
-              ref,
-              values,
-              timeoutMs: timeoutMs ?? undefined,
-            });
+
+            // Check if this is an ARIA combobox (custom dropdown) vs native <select>
+            const refInfo = lookupRefInfo({ cdpUrl, targetId: tab.targetId, ref });
+            const isCombobox = refInfo?.role === "combobox";
+
+            if (isCombobox) {
+              // Use combobox interaction pattern (click to expand, find option, click)
+              await pw.selectComboboxOptionViaPlaywright({
+                cdpUrl,
+                targetId: tab.targetId,
+                ref,
+                value: values[0] ?? "",
+                timeoutMs: timeoutMs ?? undefined,
+              });
+            } else {
+              // Native <select> element — use Playwright's selectOption
+              await pw.selectOptionViaPlaywright({
+                cdpUrl,
+                targetId: tab.targetId,
+                ref,
+                values,
+                timeoutMs: timeoutMs ?? undefined,
+              });
+            }
             return res.json({ ok: true, targetId: tab.targetId });
           }
           case "fill": {

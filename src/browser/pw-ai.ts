@@ -35,6 +35,7 @@ export {
   resizeViewportViaPlaywright,
   responseBodyViaPlaywright,
   scrollIntoViewViaPlaywright,
+  selectComboboxOptionViaPlaywright,
   selectOptionViaPlaywright,
   setDeviceViaPlaywright,
   setExtraHTTPHeadersViaPlaywright,

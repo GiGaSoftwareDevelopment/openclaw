@@ -232,6 +232,91 @@ export async function selectOptionViaPlaywright(opts: {
   }
 }
 
+/**
+ * Select an option from an ARIA combobox (custom dropdown).
+ * Works with React Select, Angular Material, Downshift, etc.
+ *
+ * Flow:
+ * 1. Click combobox to expand
+ * 2. Wait for listbox/options to appear
+ * 3. Find option matching the value (case-insensitive, supports partial)
+ * 4. Click the option
+ */
+export async function selectComboboxOptionViaPlaywright(opts: {
+  cdpUrl: string;
+  targetId?: string;
+  ref: string;
+  value: string;
+  timeoutMs?: number;
+}): Promise<void> {
+  const ref = requireRef(opts.ref);
+  const value = String(opts.value ?? "").trim();
+  if (!value) {
+    throw new Error("value is required");
+  }
+  const page = await getPageForTargetId(opts);
+  ensurePageState(page);
+  restoreRoleRefsForTarget({ cdpUrl: opts.cdpUrl, targetId: opts.targetId, page });
+  const timeout = Math.max(500, Math.min(60_000, opts.timeoutMs ?? 8000));
+  const combobox = refLocator(page, ref);
+
+  try {
+    // Step 1: Click to expand the combobox
+    await combobox.click({ timeout });
+
+    // Step 2: Wait briefly for dropdown to render
+    await page.waitForTimeout(100);
+
+    // Step 3: Find and click the matching option (partial, case-insensitive)
+    const optionLocator = page.getByRole("option", { name: value, exact: false });
+    const optionCount = await optionLocator.count();
+
+    if (optionCount === 0) {
+      // Try looking for any option containing the text
+      const allOptions = page.getByRole("option");
+      const count = await allOptions.count();
+      let found = false;
+
+      for (let i = 0; i < count; i++) {
+        const opt = allOptions.nth(i);
+        const text = await opt.textContent();
+        if (text && text.toLowerCase().includes(value.toLowerCase())) {
+          await opt.click({ timeout });
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        // If no listbox options, maybe it's a different pattern - try menu items
+        const menuItems = page.getByRole("menuitem");
+        const menuCount = await menuItems.count();
+        for (let i = 0; i < menuCount; i++) {
+          const item = menuItems.nth(i);
+          const text = await item.textContent();
+          if (text && text.toLowerCase().includes(value.toLowerCase())) {
+            await item.click({ timeout });
+            found = true;
+            break;
+          }
+        }
+      }
+
+      if (!found) {
+        throw new Error(
+          `No option matching "${value}" found in combobox. ` +
+            `Make sure the combobox is expandable and contains the option.`,
+        );
+      }
+    } else {
+      // Click the first matching option
+      await optionLocator.first().click({ timeout });
+    }
+  } catch (err) {
+    throw toAIFriendlyError(err, ref);
+  }
+}
+
 export async function pressKeyViaPlaywright(opts: {
   cdpUrl: string;
   targetId?: string;
