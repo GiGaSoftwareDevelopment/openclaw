@@ -30,6 +30,7 @@ function browserRobustFill(el: Element, value: string): void {
         new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
       );
       el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Event("blur", { bubbles: true }));
       return;
     }
     throw new Error("Element is not an input, textarea, or contenteditable");
@@ -48,11 +49,12 @@ function browserRobustFill(el: Element, value: string): void {
     el.value = value;
   }
 
-  // Dispatch input/change events that frameworks expect
+  // Dispatch input/change/blur events that frameworks expect
   el.dispatchEvent(
     new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
   );
   el.dispatchEvent(new Event("change", { bubbles: true }));
+  el.dispatchEvent(new Event("blur", { bubbles: true }));
 }
 
 /**
