@@ -22,15 +22,21 @@ import { normalizeTimeoutMs, requireRef, toAIFriendlyError } from "./pw-tools-co
  */
 function browserRobustFill(el: Element, value: string): void {
   if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) {
-    // For contenteditable elements, set textContent and dispatch input
-    if (el.hasAttribute("contenteditable") || el.isContentEditable) {
+    // For contenteditable elements, set textContent and dispatch events
+    if (el.isContentEditable) {
+      el.dispatchEvent(new Event("focus", { bubbles: true }));
       el.textContent = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(
+        new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
+      );
       el.dispatchEvent(new Event("change", { bubbles: true }));
       return;
     }
     throw new Error("Element is not an input, textarea, or contenteditable");
   }
+
+  // Focus first, matching natural user interaction flow
+  el.dispatchEvent(new Event("focus", { bubbles: true }));
 
   // Use the native prototype setter to bypass framework overrides (React, etc.)
   const proto =
@@ -42,8 +48,7 @@ function browserRobustFill(el: Element, value: string): void {
     el.value = value;
   }
 
-  // Dispatch the full event chain that frameworks expect
-  el.dispatchEvent(new Event("focus", { bubbles: true }));
+  // Dispatch input/change events that frameworks expect
   el.dispatchEvent(
     new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
   );
