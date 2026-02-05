@@ -46,10 +46,53 @@ type ExtensionForwardEventMessage = {
 type ExtensionPingMessage = { method: "ping" };
 type ExtensionPongMessage = { method: "pong" };
 
+type DiscoveredTab = {
+  chromeTabId: number;
+  title: string;
+  url: string;
+  active: boolean;
+};
+
+type TabsDiscoveredMessage = {
+  method: "tabsDiscovered";
+  params: { tabs: Array<{ tabId: number; title: string; url: string; active: boolean }> };
+};
+
+type TabDiscoveredMessage = {
+  method: "tabDiscovered";
+  params: { tabId: number; title: string; url: string; active: boolean };
+};
+
+type TabRemovedMessage = {
+  method: "tabRemoved";
+  params: { tabId: number };
+};
+
+type TabUpdatedMessage = {
+  method: "tabUpdated";
+  params: { tabId: number; title: string; url: string; active: boolean };
+};
+
+type TabActivatedMessage = {
+  method: "tabActivated";
+  params: { tabId: number; windowId?: number };
+};
+
+type AttachDiscoveredTabCommand = {
+  id: number;
+  method: "attachDiscoveredTab";
+  params: { tabId: number };
+};
+
 type ExtensionMessage =
   | ExtensionResponseMessage
   | ExtensionForwardEventMessage
-  | ExtensionPongMessage;
+  | ExtensionPongMessage
+  | TabsDiscoveredMessage
+  | TabDiscoveredMessage
+  | TabRemovedMessage
+  | TabUpdatedMessage
+  | TabActivatedMessage;
 
 type TargetInfo = {
   targetId: string;
@@ -222,6 +265,13 @@ export async function ensureChromeExtensionRelayServer(opts: {
   const cdpClients = new Set<WebSocket>();
   const connectedTargets = new Map<string, ConnectedTarget>();
 
+  /** All Chrome tabs discovered via chrome.tabs API. Key: `dtab-{chromeTabId}` */
+  const discoveredTabs = new Map<string, DiscoveredTab>();
+  /** Currently active Chrome tab (user is looking at) */
+  let activeDiscoveredTabId: string | null = null;
+  /** Maps Chrome tabId to the connected target (after attachment) */
+  const chromeTabIdToTarget = new Map<number, ConnectedTarget>();
+
   const pendingExtension = new Map<
     number,
     {
@@ -232,7 +282,23 @@ export async function ensureChromeExtensionRelayServer(opts: {
   >();
   let nextExtensionId = 1;
 
-  const sendToExtension = async (payload: ExtensionForwardCommandMessage): Promise<unknown> => {
+  const syntheticId = (chromeTabId: number) => `dtab-${chromeTabId}`;
+
+  const chromeTabIdFromSynthetic = (id: string): number | null => {
+    const match = id.match(/^dtab-(\d+)$/);
+    return match ? Number(match[1]) : null;
+  };
+
+  /** After a tab attaches, link the chromeTabId to the connected target */
+  const linkChromeTabToTarget = (chromeTabId: number, target: ConnectedTarget) => {
+    chromeTabIdToTarget.set(chromeTabId, target);
+  };
+
+  const sendToExtension = async (payload: {
+    id: number;
+    method: string;
+    params?: unknown;
+  }): Promise<unknown> => {
     const ws = extensionWs;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       throw new Error("Chrome extension not connected");
@@ -241,7 +307,7 @@ export async function ensureChromeExtensionRelayServer(opts: {
     return await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         pendingExtension.delete(payload.id);
-        reject(new Error(`extension request timeout: ${payload.params.method}`));
+        reject(new Error(`extension request timeout: ${payload.method}`));
       }, 30_000);
       pendingExtension.set(payload.id, { resolve, reject, timer });
     });
@@ -303,13 +369,26 @@ export async function ensureChromeExtensionRelayServer(opts: {
       case "Target.setAutoAttach":
       case "Target.setDiscoverTargets":
         return {};
-      case "Target.getTargets":
-        return {
-          targetInfos: Array.from(connectedTargets.values()).map((t) => ({
-            ...t.targetInfo,
-            attached: true,
-          })),
-        };
+      case "Target.getTargets": {
+        // Build set of attached chromeTabIds in single pass (O(m))
+        const attachedChromeTabIds = new Set<number>(chromeTabIdToTarget.keys());
+        const targetInfos = Array.from(connectedTargets.values()).map((t) => ({
+          ...t.targetInfo,
+          attached: true,
+        }));
+        // Add discovered (not attached) tabs
+        for (const [id, tab] of discoveredTabs) {
+          if (attachedChromeTabIds.has(tab.chromeTabId)) continue;
+          targetInfos.push({
+            targetId: id,
+            type: "page",
+            title: tab.title,
+            url: tab.url,
+            attached: false,
+          });
+        }
+        return { targetInfos };
+      }
       case "Target.getTargetInfo": {
         const params = (cmd.params ?? {}) as { targetId?: string };
         const targetId = typeof params.targetId === "string" ? params.targetId : undefined;
@@ -335,9 +414,32 @@ export async function ensureChromeExtensionRelayServer(opts: {
         if (!targetId) {
           throw new Error("targetId required");
         }
+        // Check already-attached targets
         for (const t of connectedTargets.values()) {
           if (t.targetId === targetId) {
             return { sessionId: t.sessionId };
+          }
+        }
+        // Check discovered tabs (synthetic ID)
+        const chromeTabId = chromeTabIdFromSynthetic(targetId);
+        if (chromeTabId !== null) {
+          const discovered = discoveredTabs.get(targetId);
+          if (discovered) {
+            const id = nextExtensionId++;
+            const result = (await sendToExtension({
+              id,
+              method: "attachDiscoveredTab",
+              params: { tabId: chromeTabId },
+            })) as { sessionId: string; targetId: string } | null;
+            if (result?.sessionId) {
+              // Link chromeTabId to the new target
+              const target = connectedTargets.get(result.sessionId);
+              if (target) {
+                linkChromeTabToTarget(chromeTabId, target);
+              }
+              return { sessionId: result.sessionId };
+            }
+            throw new Error("auto-attach failed");
           }
         }
         throw new Error("target not found");
@@ -413,15 +515,40 @@ export async function ensureChromeExtensionRelayServer(opts: {
 
     const listPaths = new Set(["/json", "/json/", "/json/list", "/json/list/"]);
     if (listPaths.has(path) && (req.method === "GET" || req.method === "PUT")) {
-      const list = Array.from(connectedTargets.values()).map((t) => ({
-        id: t.targetId,
-        type: t.targetInfo.type ?? "page",
-        title: t.targetInfo.title ?? "",
-        description: t.targetInfo.title ?? "",
-        url: t.targetInfo.url ?? "",
-        webSocketDebuggerUrl: cdpWsUrl,
-        devtoolsFrontendUrl: `/devtools/inspector.html?ws=${cdpWsUrl.replace("ws://", "")}`,
-      }));
+      // Build sets for dedup: known chromeTabIds + attached URLs
+      const attachedChromeTabIds = new Set<number>(chromeTabIdToTarget.keys());
+      const attachedUrls = new Set<string>();
+      const list = Array.from(connectedTargets.values()).map((t) => {
+        const url = t.targetInfo.url ?? "";
+        if (url) attachedUrls.add(url);
+        return {
+          id: t.targetId,
+          type: t.targetInfo.type ?? "page",
+          title: t.targetInfo.title ?? "",
+          description: t.targetInfo.title ?? "",
+          url,
+          webSocketDebuggerUrl: cdpWsUrl,
+          devtoolsFrontendUrl: `/devtools/inspector.html?ws=${cdpWsUrl.replace("ws://", "")}`,
+        };
+      });
+
+      // Discovered tabs (not yet attached)
+      for (const [id, tab] of discoveredTabs) {
+        // Skip if we know this chromeTabId is attached
+        if (attachedChromeTabIds.has(tab.chromeTabId)) continue;
+        // Skip if an attached tab has the same URL (manual click attach without chromeTabId link)
+        if (tab.url && attachedUrls.has(tab.url)) continue;
+        list.push({
+          id,
+          type: "page",
+          title: tab.title,
+          description: tab.title,
+          url: tab.url,
+          webSocketDebuggerUrl: "", // Not yet attached
+          devtoolsFrontendUrl: "",
+        });
+      }
+
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(list));
       return;
@@ -472,6 +599,74 @@ export async function ensureChromeExtensionRelayServer(opts: {
       })();
       res.writeHead(200);
       res.end("OK");
+      return;
+    }
+
+    const attachMatch = path.match(/^\/json\/attach\/(.+)$/);
+    if (attachMatch && (req.method === "GET" || req.method === "PUT" || req.method === "POST")) {
+      const token = getHeader(req, RELAY_AUTH_HEADER);
+      if (!token || token !== relayAuthToken) {
+        res.writeHead(401);
+        res.end("Unauthorized");
+        return;
+      }
+      const syntheticTargetId = decodeURIComponent(attachMatch[1] ?? "").trim();
+      if (!syntheticTargetId) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "targetId required" }));
+        return;
+      }
+      void (async () => {
+        try {
+          const chromeTabId = chromeTabIdFromSynthetic(syntheticTargetId);
+          if (chromeTabId === null) {
+            // Not a synthetic ID — check if it's already attached
+            for (const t of connectedTargets.values()) {
+              if (t.targetId === syntheticTargetId) {
+                res.writeHead(200, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ targetId: t.targetId, sessionId: t.sessionId }));
+                return;
+              }
+            }
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "target not found" }));
+            return;
+          }
+          const discovered = discoveredTabs.get(syntheticTargetId);
+          if (!discovered) {
+            res.writeHead(404, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "discovered tab not found" }));
+            return;
+          }
+          // Check if already attached
+          const existing = chromeTabIdToTarget.get(chromeTabId);
+          if (existing) {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ targetId: existing.targetId, sessionId: existing.sessionId }));
+            return;
+          }
+          const id = nextExtensionId++;
+          const result = (await sendToExtension({
+            id,
+            method: "attachDiscoveredTab",
+            params: { tabId: chromeTabId },
+          })) as { sessionId?: string; targetId?: string } | null;
+          if (result?.sessionId && result?.targetId) {
+            const target = connectedTargets.get(result.sessionId);
+            if (target) {
+              linkChromeTabToTarget(chromeTabId, target);
+            }
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ targetId: result.targetId, sessionId: result.sessionId }));
+          } else {
+            res.writeHead(500, { "Content-Type": "application/json" });
+            res.end(JSON.stringify({ error: "auto-attach failed" }));
+          }
+        } catch (err) {
+          res.writeHead(500, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        }
+      })();
       return;
     }
 
@@ -565,6 +760,83 @@ export async function ensureChromeExtensionRelayServer(opts: {
         if ((parsed as ExtensionPongMessage).method === "pong") {
           return;
         }
+
+        // Handle tab discovery messages (before CDP event processing)
+        const msg = parsed as ExtensionMessage;
+
+        if (msg.method === "tabsDiscovered" && "params" in msg) {
+          const tabs = (msg as TabsDiscoveredMessage).params?.tabs ?? [];
+          discoveredTabs.clear();
+          for (const tab of tabs) {
+            if (typeof tab.tabId === "number") {
+              discoveredTabs.set(syntheticId(tab.tabId), {
+                chromeTabId: tab.tabId,
+                title: tab.title ?? "",
+                url: tab.url ?? "",
+                active: tab.active ?? false,
+              });
+            }
+          }
+          return;
+        }
+
+        if (msg.method === "tabDiscovered" && "params" in msg) {
+          const p = (msg as TabDiscoveredMessage).params;
+          if (typeof p?.tabId === "number") {
+            discoveredTabs.set(syntheticId(p.tabId), {
+              chromeTabId: p.tabId,
+              title: p.title ?? "",
+              url: p.url ?? "",
+              active: p.active ?? false,
+            });
+          }
+          return;
+        }
+
+        if (msg.method === "tabRemoved" && "params" in msg) {
+          const p = (msg as TabRemovedMessage).params;
+          if (typeof p?.tabId === "number") {
+            discoveredTabs.delete(syntheticId(p.tabId));
+            if (activeDiscoveredTabId === syntheticId(p.tabId)) {
+              activeDiscoveredTabId = null;
+            }
+          }
+          return;
+        }
+
+        if (msg.method === "tabUpdated" && "params" in msg) {
+          const p = (msg as TabUpdatedMessage).params;
+          if (typeof p?.tabId === "number") {
+            const existing = discoveredTabs.get(syntheticId(p.tabId));
+            discoveredTabs.set(syntheticId(p.tabId), {
+              chromeTabId: p.tabId,
+              title: (p.title || existing?.title) ?? "",
+              url: (p.url || existing?.url) ?? "",
+              active: p.active ?? existing?.active ?? false,
+            });
+          }
+          return;
+        }
+
+        if (msg.method === "tabActivated" && "params" in msg) {
+          const p = (msg as TabActivatedMessage).params;
+          if (typeof p?.tabId === "number") {
+            // Mark previous active as inactive
+            for (const [id, tab] of discoveredTabs) {
+              if (tab.active) {
+                discoveredTabs.set(id, { ...tab, active: false });
+              }
+            }
+            const id = syntheticId(p.tabId);
+            const tab = discoveredTabs.get(id);
+            if (tab) {
+              discoveredTabs.set(id, { ...tab, active: true });
+            }
+            activeDiscoveredTabId = id;
+          }
+          return;
+        }
+
         if ((parsed as ExtensionForwardEventMessage).method !== "forwardCDPEvent") {
           return;
         }
@@ -610,6 +882,13 @@ export async function ensureChromeExtensionRelayServer(opts: {
           const detached = (params ?? {}) as DetachedFromTargetEvent;
           if (detached?.sessionId) {
             connectedTargets.delete(detached.sessionId);
+            // Clean up chromeTabId→target mapping
+            for (const [tabId, target] of chromeTabIdToTarget) {
+              if (target.sessionId === detached.sessionId) {
+                chromeTabIdToTarget.delete(tabId);
+                break;
+              }
+            }
           }
           broadcastToCdpClients({ method, params, sessionId });
           return;
@@ -647,6 +926,9 @@ export async function ensureChromeExtensionRelayServer(opts: {
       }
       pendingExtension.clear();
       connectedTargets.clear();
+      discoveredTabs.clear();
+      activeDiscoveredTabId = null;
+      chromeTabIdToTarget.clear();
 
       for (const client of cdpClients) {
         try {

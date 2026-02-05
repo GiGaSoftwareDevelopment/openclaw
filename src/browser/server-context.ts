@@ -302,7 +302,7 @@ function createProfileContext(
       }
       // Relay server is up, but no attached tab yet. Prompt user to attach.
       throw new Error(
-        `Chrome extension relay is running, but no tab is connected. Click the OpenClaw Chrome extension icon on a tab to attach it (profile "${profile.name}").`,
+        `Chrome extension relay is running, but no tab is attached yet. Click the OpenClaw Chrome extension icon on any tab to start the relay connection (profile "${profile.name}").`,
       );
     }
 
@@ -373,8 +373,8 @@ function createProfileContext(
     if (tabs1.length === 0) {
       if (profile.driver === "extension") {
         throw new Error(
-          `tab not found (no attached Chrome tabs for profile "${profile.name}"). ` +
-            "Click the OpenClaw Browser Relay toolbar icon on the tab you want to control (badge ON).",
+          `tab not found (no Chrome tabs available for profile "${profile.name}"). ` +
+            "Click the OpenClaw Browser Relay toolbar icon on any tab to connect.",
         );
       }
       await openTab("about:blank");
@@ -424,6 +424,30 @@ function createProfileContext(
       throw new Error("tab not found");
     }
     profileState.lastTargetId = chosen.targetId;
+
+    // Auto-attach discovered tabs for extension driver
+    if (chosen.targetId.startsWith("dtab-") && profile.driver === "extension") {
+      // Discovered tab — trigger auto-attach via relay
+      try {
+        const attachResult = await fetchJson<{ targetId: string; sessionId: string }>(
+          appendCdpPath(profile.cdpUrl, `/json/attach/${encodeURIComponent(chosen.targetId)}`),
+          10_000,
+        );
+        if (attachResult?.targetId) {
+          // Update the tab reference with the real targetId
+          chosen = { ...chosen, targetId: attachResult.targetId };
+          profileState.lastTargetId = attachResult.targetId;
+          // Give Playwright time to process the Target.attachedToTarget event
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `Failed to auto-attach discovered tab ${chosen.targetId} for profile "${profile.name}": ${detail}`,
+        );
+      }
+    }
+
     return chosen;
   };
 

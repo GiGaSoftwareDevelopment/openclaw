@@ -72,3 +72,4 @@ USER.md
 # local tooling
 .serena/
 # .giga/ is intentionally tracked — GigaSoftware fork-specific files
+firebase-debug.log
