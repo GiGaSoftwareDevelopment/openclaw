@@ -100,7 +100,13 @@ async function fillWithVerify(locator: Locator, value: string, timeout: number):
     return null;
   });
 
-  if (finalValue !== null && finalValue !== value) {
+  if (finalValue === null) {
+    throw new Error(
+      `Fill verification failed: unable to read value after fallback for expected "${value.slice(0, 50)}"`,
+    );
+  }
+
+  if (finalValue !== value) {
     throw new Error(
       `Fill verification failed: expected "${value.slice(0, 50)}" but got "${finalValue.slice(0, 50)}"`,
     );
