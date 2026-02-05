@@ -307,11 +307,7 @@ export async function ensureChromeExtensionRelayServer(opts: {
     return await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         pendingExtension.delete(payload.id);
-        const methodStr =
-          typeof payload.method === "string"
-            ? payload.method
-            : ((payload as ExtensionForwardCommandMessage).params?.method ?? "unknown");
-        reject(new Error(`extension request timeout: ${methodStr}`));
+        reject(new Error(`extension request timeout: ${payload.method}`));
       }, 30_000);
       pendingExtension.set(payload.id, { resolve, reject, timer });
     });
@@ -374,18 +370,15 @@ export async function ensureChromeExtensionRelayServer(opts: {
       case "Target.setDiscoverTargets":
         return {};
       case "Target.getTargets": {
-        const attachedIds = new Set<number>();
-        const targetInfos = Array.from(connectedTargets.values()).map((t) => {
-          for (const [tabId, target] of chromeTabIdToTarget) {
-            if (target.sessionId === t.sessionId) attachedIds.add(tabId);
-          }
-          return { ...t.targetInfo, attached: true };
-        });
+        // Build set of attached chromeTabIds in single pass (O(m))
+        const attachedChromeTabIds = new Set<number>(chromeTabIdToTarget.keys());
+        const targetInfos = Array.from(connectedTargets.values()).map((t) => ({
+          ...t.targetInfo,
+          attached: true,
+        }));
         // Add discovered (not attached) tabs
         for (const [id, tab] of discoveredTabs) {
-          if (attachedIds.has(tab.chromeTabId)) continue;
-          const alreadyListed = targetInfos.some((t) => t.url === tab.url && t.title === tab.title);
-          if (alreadyListed) continue;
+          if (attachedChromeTabIds.has(tab.chromeTabId)) continue;
           targetInfos.push({
             targetId: id,
             type: "page",
@@ -522,21 +515,18 @@ export async function ensureChromeExtensionRelayServer(opts: {
 
     const listPaths = new Set(["/json", "/json/", "/json/list", "/json/list/"]);
     if (listPaths.has(path) && (req.method === "GET" || req.method === "PUT")) {
-      // Attached tabs (existing)
-      const attachedIds = new Set<number>();
+      // Build sets for dedup: known chromeTabIds + attached URLs
+      const attachedChromeTabIds = new Set<number>(chromeTabIdToTarget.keys());
+      const attachedUrls = new Set<string>();
       const list = Array.from(connectedTargets.values()).map((t) => {
-        // Track which chromeTabIds are already attached
-        for (const [tabId, target] of chromeTabIdToTarget) {
-          if (target.sessionId === t.sessionId) {
-            attachedIds.add(tabId);
-          }
-        }
+        const url = t.targetInfo.url ?? "";
+        if (url) attachedUrls.add(url);
         return {
           id: t.targetId,
           type: t.targetInfo.type ?? "page",
           title: t.targetInfo.title ?? "",
           description: t.targetInfo.title ?? "",
-          url: t.targetInfo.url ?? "",
+          url,
           webSocketDebuggerUrl: cdpWsUrl,
           devtoolsFrontendUrl: `/devtools/inspector.html?ws=${cdpWsUrl.replace("ws://", "")}`,
         };
@@ -544,10 +534,10 @@ export async function ensureChromeExtensionRelayServer(opts: {
 
       // Discovered tabs (not yet attached)
       for (const [id, tab] of discoveredTabs) {
-        if (attachedIds.has(tab.chromeTabId)) continue;
-        // Also check if there's an attached target with matching URL (for tabs attached via manual click)
-        const alreadyListed = list.some((l) => l.url === tab.url && l.title === tab.title);
-        if (alreadyListed) continue;
+        // Skip if we know this chromeTabId is attached
+        if (attachedChromeTabIds.has(tab.chromeTabId)) continue;
+        // Skip if an attached tab has the same URL (manual click attach without chromeTabId link)
+        if (tab.url && attachedUrls.has(tab.url)) continue;
         list.push({
           id,
           type: "page",
@@ -820,8 +810,8 @@ export async function ensureChromeExtensionRelayServer(opts: {
             const existing = discoveredTabs.get(syntheticId(p.tabId));
             discoveredTabs.set(syntheticId(p.tabId), {
               chromeTabId: p.tabId,
-              title: p.title ?? existing?.title ?? "",
-              url: p.url ?? existing?.url ?? "",
+              title: (p.title || existing?.title) ?? "",
+              url: (p.url || existing?.url) ?? "",
               active: p.active ?? existing?.active ?? false,
             });
           }
@@ -892,6 +882,13 @@ export async function ensureChromeExtensionRelayServer(opts: {
           const detached = (params ?? {}) as DetachedFromTargetEvent;
           if (detached?.sessionId) {
             connectedTargets.delete(detached.sessionId);
+            // Clean up chromeTabId→target mapping
+            for (const [tabId, target] of chromeTabIdToTarget) {
+              if (target.sessionId === detached.sessionId) {
+                chromeTabIdToTarget.delete(tabId);
+                break;
+              }
+            }
           }
           broadcastToCdpClients({ method, params, sessionId });
           return;

@@ -374,7 +374,7 @@ function createProfileContext(
       if (profile.driver === "extension") {
         throw new Error(
           `tab not found (no Chrome tabs available for profile "${profile.name}"). ` +
-            "Click the OpenClaw Browser Relay toolbar icon on any tab to enable tab discovery.",
+            "Click the OpenClaw Browser Relay toolbar icon on any tab to connect.",
         );
       }
       await openTab("about:blank");
@@ -428,16 +428,22 @@ function createProfileContext(
     // Auto-attach discovered tabs for extension driver
     if (chosen.targetId.startsWith("dtab-") && profile.driver === "extension") {
       // Discovered tab — trigger auto-attach via relay
-      const attachResult = await fetchJson<{ targetId: string; sessionId: string }>(
-        appendCdpPath(profile.cdpUrl, `/json/attach/${encodeURIComponent(chosen.targetId)}`),
-        10_000,
-      );
-      if (attachResult?.targetId) {
-        // Update the tab reference with the real targetId
-        chosen = { ...chosen, targetId: attachResult.targetId };
-        profileState.lastTargetId = attachResult.targetId;
-        // Give Playwright a moment to process the Target.attachedToTarget event
-        await new Promise((r) => setTimeout(r, 300));
+      try {
+        const attachResult = await fetchJson<{ targetId: string; sessionId: string }>(
+          appendCdpPath(profile.cdpUrl, `/json/attach/${encodeURIComponent(chosen.targetId)}`),
+          10_000,
+        );
+        if (attachResult?.targetId) {
+          // Update the tab reference with the real targetId
+          chosen = { ...chosen, targetId: attachResult.targetId };
+          profileState.lastTargetId = attachResult.targetId;
+          // Give Playwright time to process the Target.attachedToTarget event
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      } catch {
+        throw new Error(
+          `Failed to auto-attach discovered tab ${chosen.targetId} for profile "${profile.name}".`,
+        );
       }
     }
 
