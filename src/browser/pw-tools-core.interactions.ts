@@ -1,3 +1,4 @@
+import type { Locator } from "playwright-core";
 import type { BrowserFormField } from "./client-actions-core.js";
 import {
   ensurePageState,
@@ -6,6 +7,111 @@ import {
   restoreRoleRefsForTarget,
 } from "./pw-session.js";
 import { normalizeTimeoutMs, requireRef, toAIFriendlyError } from "./pw-tools-core.shared.js";
+
+// ---------------------------------------------------------------------------
+// CLAW-3: Robust fill with framework event dispatch
+// ---------------------------------------------------------------------------
+
+/**
+ * Browser-context script that sets an input/textarea value using the native
+ * prototype setter and dispatches the full event chain so that framework
+ * bindings (React onChange, Angular ngModel/reactive forms, Vue v-model)
+ * pick up the change.
+ *
+ * This is injected via locator.evaluate() and runs inside the page.
+ */
+function browserRobustFill(el: Element, value: string): void {
+  if (!(el instanceof HTMLInputElement) && !(el instanceof HTMLTextAreaElement)) {
+    // For contenteditable elements, set textContent and dispatch events
+    if (el.isContentEditable) {
+      el.dispatchEvent(new Event("focus", { bubbles: false }));
+      el.textContent = value;
+      el.dispatchEvent(
+        new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
+      );
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Event("blur", { bubbles: false }));
+      return;
+    }
+    throw new Error("Element is not an input, textarea, or contenteditable");
+  }
+
+  // Focus first, matching natural user interaction flow
+  // Per DOM spec: focus does not bubble (use focusin for bubbling variant)
+  el.dispatchEvent(new Event("focus", { bubbles: false }));
+
+  // Use the native prototype setter to bypass framework overrides (React, etc.)
+  const proto =
+    el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const nativeSetter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+  if (nativeSetter) {
+    nativeSetter.call(el, value);
+  } else {
+    el.value = value;
+  }
+
+  // Dispatch input/change/blur events that frameworks expect
+  el.dispatchEvent(
+    new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }),
+  );
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+  // Per DOM spec: blur does not bubble (use focusout for bubbling variant)
+  el.dispatchEvent(new Event("blur", { bubbles: false }));
+}
+
+/**
+ * Try Playwright's native fill(), then verify the value was actually set.
+ * If the value doesn't match (e.g. framework reset it), fall back to
+ * the native-setter approach with full event dispatch.
+ */
+async function fillWithVerify(locator: Locator, value: string, timeout: number): Promise<void> {
+  // Fast path: Playwright's built-in fill
+  await locator.fill(value, { timeout });
+
+  // Verify the value stuck (frameworks may have reset it)
+  const actual = await locator
+    .evaluate((el) => {
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+        return el.value;
+      }
+      if (el.isContentEditable) {
+        return el.textContent ?? "";
+      }
+      return null;
+    })
+    .catch(() => null);
+
+  // If value matches or we couldn't read it, we're done
+  if (actual === null || actual === value) {
+    return;
+  }
+
+  // Fallback: use native setter + framework events
+  await locator.evaluate(browserRobustFill, value);
+
+  // Final verify — if still wrong, throw so the caller knows
+  const finalValue = await locator.evaluate((el) => {
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
+      return el.value;
+    }
+    if (el.isContentEditable) {
+      return el.textContent ?? "";
+    }
+    return null;
+  });
+
+  if (finalValue === null) {
+    throw new Error(
+      `Fill verification failed: unable to read value after fallback for expected "${value.slice(0, 50)}"`,
+    );
+  }
+
+  if (finalValue !== value) {
+    throw new Error(
+      `Fill verification failed: expected "${value.slice(0, 50)}" but got "${finalValue.slice(0, 50)}"`,
+    );
+  }
+}
 
 export async function highlightViaPlaywright(opts: {
   cdpUrl: string;
@@ -164,7 +270,7 @@ export async function typeViaPlaywright(opts: {
       await locator.click({ timeout });
       await locator.type(text, { timeout, delay: 75 });
     } else {
-      await locator.fill(text, { timeout });
+      await fillWithVerify(locator, text, timeout);
     }
     if (opts.submit) {
       await locator.press("Enter", { timeout });
@@ -209,7 +315,7 @@ export async function fillFormViaPlaywright(opts: {
       continue;
     }
     try {
-      await locator.fill(value, { timeout });
+      await fillWithVerify(locator, value, timeout);
     } catch (err) {
       throw toAIFriendlyError(err, ref);
     }
