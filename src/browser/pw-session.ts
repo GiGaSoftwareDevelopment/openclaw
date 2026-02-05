@@ -158,6 +158,48 @@ export function storeRoleRefsForTarget(opts: {
   });
 }
 
+/**
+ * Look up the role+name+nth metadata for a specific ref in the cached roleRefs for a target.
+ * Returns undefined if the target or ref is not found.
+ */
+export function lookupRefInfo(opts: {
+  cdpUrl: string;
+  targetId: string;
+  ref: string;
+}): { role: string; name?: string; nth?: number } | undefined {
+  const key = roleRefsKey(opts.cdpUrl, opts.targetId);
+  const cached = roleRefsByTarget.get(key);
+  if (!cached?.refs) {
+    return undefined;
+  }
+  const normalized = opts.ref.startsWith("e") ? opts.ref : `e${opts.ref}`;
+  return cached.refs[normalized];
+}
+
+/**
+ * Find a ref in the current cached roleRefs that matches the given role+name+nth.
+ * Returns the ref string (e.g. "e5") or undefined if no match.
+ */
+export function findRefByRoleInfo(opts: {
+  cdpUrl: string;
+  targetId: string;
+  role: string;
+  name?: string;
+  nth?: number;
+}): string | undefined {
+  const key = roleRefsKey(opts.cdpUrl, opts.targetId);
+  const cached = roleRefsByTarget.get(key);
+  if (!cached?.refs) {
+    return undefined;
+  }
+  for (const [ref, info] of Object.entries(cached.refs)) {
+    if (info.role === opts.role && info.name === opts.name && info.nth === opts.nth) {
+      return ref;
+    }
+  }
+  return undefined;
+}
+
 export function restoreRoleRefsForTarget(opts: {
   cdpUrl: string;
   targetId?: string;
