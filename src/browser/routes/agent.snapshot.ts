@@ -108,8 +108,14 @@ export function registerBrowserAgentSnapshotRoutes(
     try {
       const tab = await profileCtx.ensureTabAvailable(targetId);
       let buffer: Buffer;
-      const shouldUsePlaywright =
-        profileCtx.profile.driver === "extension" || !tab.wsUrl || Boolean(ref) || Boolean(element);
+      // Prefer raw CDP for plain page screenshots when wsUrl is available.
+      // Playwright's page.screenshot() resizes the viewport to 1×1 px (and back),
+      // which triggers window 'resize' events that can break SPA routing in
+      // frameworks like Angular/React (microsoft/playwright#30149, #15589).
+      const mustUsePlaywright = Boolean(ref) || Boolean(element);
+      const canUseCdp =
+        !mustUsePlaywright && Boolean(tab.wsUrl) && profileCtx.profile.driver !== "extension";
+      const shouldUsePlaywright = !canUseCdp;
       if (shouldUsePlaywright) {
         const pw = await requirePwAi(res, "screenshot");
         if (!pw) {

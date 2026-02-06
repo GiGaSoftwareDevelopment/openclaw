@@ -70,7 +70,10 @@ export async function captureScreenshot(opts: {
       format,
       ...(quality !== undefined ? { quality } : {}),
       fromSurface: true,
-      captureBeyondViewport: true,
+      // captureBeyondViewport causes a viewport resize to 1×1 px in Chromium-based
+      // browsers, which fires window 'resize' events that break SPA routing
+      // (Angular/React). Only enable it when a clip is provided (fullPage mode).
+      ...(clip ? { captureBeyondViewport: true } : {}),
       ...(clip ? { clip } : {}),
     })) as { data?: string };
 
